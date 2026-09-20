@@ -1,0 +1,190 @@
+---
+title: "Predicting Weight-Lifting Technique from Wearable Sensors"
+author: "Sara Mishra"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 7.2, fig.height = 4.5, dpi = 120)
+set.seed(20260920)
+library(caret)
+library(randomForest)
+```
+
+## Executive summary
+
+This analysis predicts how participants performed a barbell lift from measurements recorded by accelerometers on the belt, forearm, arm, and dumbbell. The outcome, `classe`, has five levels. Class A represents the correct movement; classes B through E represent four common mistakes.
+
+I removed identifiers, names, timestamps, window fields, and predictors that were missing in either supplied data set. The resulting model uses 52 sensor measurements. A random forest was chosen because the predictors interact nonlinearly and include several correlated orientation, acceleration, gyroscope, and magnetometer signals. Five-fold stratified cross-validation selected the tuning parameter. A separate 25% validation set estimated out-of-sample performance.
+
+## Data preparation
+
+```{r load-data}
+dir.create("data", showWarnings = FALSE)
+training_url <- paste0(
+  "https://d396qusza40orc.cloudfront.net/predmachlearn/",
+  "pml-training.csv"
+)
+testing_url <- paste0(
+  "https://d396qusza40orc.cloudfront.net/predmachlearn/",
+  "pml-testing.csv"
+)
+if (!file.exists("data/pml-training.csv")) {
+  download.file(training_url, "data/pml-training.csv", mode = "wb")
+}
+if (!file.exists("data/pml-testing.csv")) {
+  download.file(testing_url, "data/pml-testing.csv", mode = "wb")
+}
+
+na_codes <- c("NA", "#DIV/0!", "")
+training <- read.csv("data/pml-training.csv", na.strings = na_codes,
+                     check.names = TRUE)
+testing <- read.csv("data/pml-testing.csv", na.strings = na_codes,
+                    check.names = TRUE)
+
+metadata <- c("X", "user_name", "raw_timestamp_part_1",
+              "raw_timestamp_part_2", "cvtd_timestamp", "new_window",
+              "num_window", "classe", "problem_id")
+
+candidate_names <- setdiff(names(training), metadata)
+numeric_names <- candidate_names[
+  vapply(training[candidate_names], is.numeric, logical(1))
+]
+complete_train <- vapply(training[numeric_names], function(x) all(!is.na(x)),
+                         logical(1))
+complete_test <- vapply(testing[numeric_names], function(x) all(!is.na(x)),
+                        logical(1))
+predictor_names <- numeric_names[complete_train & complete_test]
+
+model_data <- training[c(predictor_names, "classe")]
+model_data$classe <- factor(model_data$classe)
+quiz_data <- testing[predictor_names]
+
+dim(model_data)
+table(model_data$classe)
+```
+
+The source contains `r nrow(training)` labeled observations and `r ncol(training)` columns. After filtering, the model matrix contains `r length(predictor_names)` predictors. The metadata fields were excluded before any resampling because row order and collection time identify the recording session rather than the physical movement. Keeping them would create leakage and overstate generalization.
+
+```{r class-balance, echo=FALSE}
+class_counts <- table(model_data$classe)
+barplot(class_counts, col = "#2F6B63", border = NA,
+        main = "Training observations by exercise class",
+        xlab = "Class", ylab = "Observations")
+```
+
+All classes have thousands of observations, so no up-sampling or class weighting was needed. The split preserves the class proportions.
+
+```{r split}
+build_index <- createDataPartition(model_data$classe, p = 0.75,
+                                   list = FALSE)
+build <- model_data[build_index, ]
+validation <- model_data[-build_index, ]
+```
+
+## Model building and cross-validation
+
+A single decision tree provides an interpretable baseline. The random forest averages many decorrelated trees and should reduce the variance of that baseline. Within the 75% build sample, five stratified folds estimate accuracy for three candidate values of `mtry`, the number of predictors considered at each split.
+
+```{r train-models, cache=TRUE}
+control <- trainControl(method = "cv", number = 5,
+                        classProbs = FALSE, savePredictions = "final")
+
+set.seed(20260920)
+tree_fit <- train(classe ~ ., data = build, method = "rpart",
+                  trControl = control, tuneLength = 5)
+
+set.seed(20260920)
+rf_fit <- train(classe ~ ., data = build, method = "rf",
+                trControl = control, metric = "Accuracy",
+                tuneGrid = data.frame(mtry = c(4, 7, 10)),
+                ntree = 500, importance = TRUE)
+
+tree_prediction <- predict(tree_fit, validation)
+rf_prediction <- predict(rf_fit, validation)
+tree_accuracy <- mean(tree_prediction == validation$classe)
+rf_accuracy <- mean(rf_prediction == validation$classe)
+comparison <- data.frame(
+  Model = c("Decision tree", "Random forest"),
+  Accuracy = c(tree_accuracy, rf_accuracy)
+)
+comparison
+```
+
+```{r model-comparison, echo=FALSE}
+barplot(comparison$Accuracy, names.arg = comparison$Model,
+        horiz = TRUE, las = 1, col = c("#9DB4AE", "#214F49"),
+        xlim = c(0.80, 1), border = NA,
+        main = "Validation accuracy by candidate model", xlab = "Accuracy")
+```
+
+The random forest is retained because it has the higher untouched validation accuracy. Cross-validation is used only for tuning; the validation sample remains unavailable to the training procedure.
+
+## Out-of-sample performance
+
+```{r validation-results}
+validation_cm <- confusionMatrix(rf_prediction, validation$classe)
+validation_cm
+validation_accuracy <- unname(validation_cm$overall["Accuracy"])
+validation_error <- 1 - validation_accuracy
+```
+
+The estimated out-of-sample accuracy is **`r sprintf('%.2f%%', 100 * validation_accuracy)`**, corresponding to an error rate of **`r sprintf('%.2f%%', 100 * validation_error)`**. This estimate applies to observations drawn in the same way as the supplied data. It may be optimistic for entirely new participants or devices because the random split allows the same participant to appear in both build and validation samples.
+
+```{r confusion-figure, echo=FALSE}
+cm <- as.matrix(validation_cm$table)
+image(t(cm[nrow(cm):1, ]), axes = FALSE, col = hcl.colors(20, "Blues 3"),
+      main = "Random-forest validation confusion matrix")
+axis(1, at = seq(0, 1, length.out = ncol(cm)), labels = colnames(cm))
+axis(2, at = seq(0, 1, length.out = nrow(cm)), labels = rev(rownames(cm)))
+mtext("Predicted class", side = 1, line = 2.5)
+mtext("Observed class", side = 2, line = 2.5)
+```
+
+The few errors are distributed across several class pairs rather than concentrated in one systematically weak class.
+
+## Important measurements
+
+```{r importance, echo=FALSE}
+importance <- varImp(rf_fit)$importance
+importance$feature <- rownames(importance)
+importance <- importance[order(importance$Overall, decreasing = TRUE), ]
+top <- head(importance, 15)
+par(mar = c(4, 10, 3, 1))
+barplot(rev(top$Overall), names.arg = rev(top$feature), horiz = TRUE,
+        las = 1, col = "#2F6B63", border = NA,
+        main = "Top sensor predictors", xlab = "Scaled importance")
+```
+
+Belt orientation, forearm orientation, and dumbbell magnetic measurements tend to be most useful. Importance is descriptive rather than causal: correlated sensors can share importance, and impurity-based scores can favor variables with more possible split points.
+
+## Final model and quiz predictions
+
+The final random forest uses all labeled rows and the cross-validated `mtry` selected above. Refitting after model selection makes the full labeled sample available to each tree.
+
+```{r final-model, cache=TRUE}
+best_mtry <- rf_fit$bestTune$mtry
+set.seed(20260920)
+final_rf <- randomForest(x = model_data[predictor_names],
+                         y = model_data$classe,
+                         mtry = best_mtry, ntree = 600,
+                         importance = TRUE)
+quiz_prediction <- predict(final_rf, quiz_data)
+quiz_results <- data.frame(problem_id = testing$problem_id,
+                           prediction = quiz_prediction)
+knitr::kable(quiz_results, row.names = FALSE)
+write.csv(quiz_results, "quiz_predictions.csv", row.names = FALSE)
+```
+
+## Reproducibility
+
+The analysis uses a fixed seed, explicit missing-value codes, a recorded predictor-selection rule, stratified resampling, and relative file paths. If the two CSV files are absent, the report downloads them from the course URLs into `data/`. Open this project directory in RStudio, install `caret`, `randomForest`, and `rmarkdown` if needed, and knit this file. The generated `quiz_predictions.csv` is the submission-ready prediction file.
+
+Data source: [Practical Machine Learning course files](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and the [Weight Lifting Exercise Dataset](http://groupware.les.inf.puc-rio.br/har).
