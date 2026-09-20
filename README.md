@@ -1,6 +1,6 @@
 # Predicting Weight-Lifting Technique from Wearable Sensors
 
-**Author:** Sanidhya Singhal
+**Author:** Sara Mishra
 
 This repository contains the Practical Machine Learning prediction assignment. It classifies barbell-lifting technique from wearable-sensor measurements using a cross-validated random forest.
 
